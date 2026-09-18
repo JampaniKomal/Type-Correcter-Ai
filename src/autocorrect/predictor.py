@@ -115,9 +115,15 @@ class Corrector:
                 continue
             word = self.reverse_word_index.get(idx)
             if word:
-                if word == '<eos>': # Stop at end-of-sequence
+                # The tokenizer's default filters strip '<' and '>' from
+                # the literal "<sos>"/"<eos>" text seen during training, so
+                # the vocabulary actually stores these as bare "sos"/"eos" -
+                # matching the bracketed form here never fires, letting both
+                # tokens leak into every prediction and preventing early
+                # stopping at the real end of the sequence.
+                if word == 'eos': # Stop at end-of-sequence
                     break
-                if word == '<sos>': # Skip start-of-sequence
+                if word == 'sos': # Skip start-of-sequence
                     continue
                 words.append(word)
         return ' '.join(words)

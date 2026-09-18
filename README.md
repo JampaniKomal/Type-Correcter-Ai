@@ -123,10 +123,31 @@ python src/training_scripts/01_data_preprocessing.py
 python src/training_scripts/02_model_training.py
 ```
 
+`02_model_training.py` has a `TEST_MODE` flag at the top: `True` trains on
+just 20,000 samples for 3 epochs (fast, for verifying the pipeline works);
+`False` trains on the full corpus for 50 epochs (slow, the real model).
+**The committed `model/autocorrect_model.h5` was trained with
+`TEST_MODE = True`** — see Known Limitations below.
+
+## Known limitations
+
+- **The shipped model is the quick test-mode run, not a fully-trained
+  one.** Verified by loading `autocorrect_model.h5` directly and running
+  real predictions: it currently outputs `<oov>` (out-of-vocabulary) for
+  most non-trivial input, since it only saw 20,000 of the full training
+  set's samples for 3 epochs. Re-run `02_model_training.py` with
+  `TEST_MODE = False` (expect a long CPU training time, or use a GPU
+  environment) to get a model that actually corrects text well.
+- Fixed while verifying this: `predictor.py`'s output decoding checked
+  for the literal strings `'<sos>'`/`'<eos>'`, but Keras's `Tokenizer`
+  strips `<`/`>` by default, so the real vocabulary entries are `'sos'`/
+  `'eos'` — the check never matched, so both control tokens leaked into
+  every prediction and generation never stopped early. Fixed to match the
+  actual vocabulary.
+
 ## Acknowledgements
 
-- Dataset basis: [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de/en/download/English)  
-- Prototyping and debugging assistance: Google Gemini
+- Dataset basis: [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de/en/download/English)
 
 ## License
 
