@@ -1,8 +1,3 @@
-flask
-numpy==1.26.4
-pandas
-scikit-learn
-tensorflow
-matplotlib
-pyyaml
-keras-preprocessing
+# The web app runs the model with NumPy only - no TensorFlow needed to serve it.
+flask>=3,<4
+numpy>=1.23,<2

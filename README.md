@@ -1,154 +1,123 @@
-# Type Correcter Ai
+# Type Correcter AI
 
-**Course:** Artificial Intelligence (G5AD21AI)  
-**Project:** Final AI Project Submission
+A small **Flask web app** that fixes typos in a block of text. Paste in
+"teh recieve is beleive and i havw a problme", press **Correct Text**, and get
+back "the receive is believe and i have a problem". The correction is done by a
+character-level sequence-to-sequence neural network, served word by word with a
+dictionary gate so it never changes a word that was already right.
 
-A deep-learning application that corrects typing errors. This repository includes the source code, a trained model, and a Flask-based web GUI to demo the model.
+> **Course:** Artificial Intelligence (G5AD21AI) — final project. The deliverable
+> is a working web GUI that serves a trained Seq2Seq typo corrector.
 
-## Project overview
+![The web GUI: a typo-filled sentence on the left is corrected on the right to "the receive is believe and i have a problem writing something"](docs/demo_screenshot.png)
 
-Build an intelligent system that identifies and corrects common typographical errors using a Sequence-to-Sequence (Seq2Seq) model trained on paired noisy (mistyped) and clean text. Deliverable: a working web GUI where users input text and receive corrected output.
+## Where this fits (a 4-part exploration)
 
-## Project evolution (literature review)
+This is **Phase 3** of a four-project look at automatic typing correction:
 
-- Prototype 1: [invisible-autocorrect-extension](https://github.com/JAMPANIKOMAL/invisible-autocorrect-extension)  
-    Concept: Frequency-based dictionary browser extension. Limitation: Non-contextual; could not fix internal-word errors or partial words.
+1. **[invisible-autocorrect-extension](https://github.com/JampaniKomal/invisible-autocorrect-extension)** — a frequency dictionary (no ML).
+2. **[Ghost-Type-Corrector](https://github.com/JampaniKomal/Ghost-Type-Corrector)** — a character-level seq2seq model, run inside a browser extension.
+3. **Type Correcter AI** (this repo) — take that trained model **off the browser** and serve it from a Flask web app, so anyone can use it from a web page.
+4. **[AI_Corrector_Project](https://github.com/JampaniKomal/AI_Corrector_Project)** — go system-wide with a T5 Transformer desktop corrector.
 
-- Prototype 2: [ghost-type-corrector](https://github.com/JAMPANIKOMAL/Ghost-Type-Corrector)  
-    Concept: First Seq2Seq AI attempt; produced `autocorrect_model.h5` and tokenizer config. Limitation: Model existed but GUI integration was incomplete.
+This project **integrates the model trained in Phase 2**. The web app itself
+runs the model with **NumPy only — it does not need TensorFlow** — so the server
+is small and starts instantly.
 
-This project integrates the trained AI from Prototype 2 into a clean, functional Flask GUI.
+## How it works
 
-## Methodology & techniques
+```
+browser ──POST /predict {"text": "..."}──> Flask (routes.py)
+                                              │
+                                              ▼
+                                  predictor.Corrector.predict(text)
+                                   │  split the text into words
+                                   │  correct each word:
+                                   │    - in the dictionary?  leave it
+                                   │    - too short (a, i)?   leave it
+                                   │    - else: beam-search the seq2seq model,
+                                   │           take the best real-word candidate
+                                   ▼
+                              corrected text ──> {"correction": "..."}
+```
 
-- AI technique: Natural Language Processing (NLP)  
-- Model architecture: Seq2Seq with Bidirectional GRU layers  
-- Frameworks & libraries:
-    - TensorFlow (Keras)
-    - Flask
-    - pandas, scikit-learn (preprocessing)
-- Dataset: Custom corpus (`data/raw_corpus.txt`) used to generate training pairs
+- **The model** is the character-level encoder-decoder LSTM from Phase 2
+  (`model/weights.npz`, ~3 MB), loaded once as a singleton when the app starts.
+- **The dictionary gate** (`data/dictionary.txt`) makes the corrector safe to
+  run over real text: a known word is never touched, short words like "a" and
+  "i" are left alone, and a suggestion is only used if it is itself a real word.
+- **Beam search** keeps several candidates and picks the best real word, which
+  roughly doubles the correction rate over greedy decoding.
+
+## Run it
+
+```bash
+pip install -r requirements.txt
+python app.py
+# open http://localhost:5000   (or http://localhost:5000/?demo for a filled-in example)
+```
 
 ## Project structure
 
 ```
 Type-Correcter-Ai/
-├── .gitignore
-├── app.py
-├── environment.yml
-├── environment-gpu.yml
-├── requirements.txt
-├── README.md
-├── LICENSE
-│
-├── data/
-│   ├── .gitkeep            # add raw_corpus.txt, train_*.txt, tokenizer_config.json
-│
+├── app.py                         # entry point (Flask app factory)
+├── requirements.txt               # flask + numpy (that's all it needs to serve)
 ├── model/
-│   ├── .gitkeep            # add autocorrect_model.h5
-│
-└── src/
-        ├── __init__.py
-        ├── autocorrect/
-        │   ├── __init__.py
-        │   └── predictor.py
-        │
-        ├── training_scripts/
-        │   ├── __init__.py
-        │   ├── 01_data_preprocessing.py
-        │   └── 02_model_training.py
-        │
-        └── webapp/
-                ├── __init__.py
-                ├── routes.py
-                ├── static/
-                │   ├── script.js
-                │   └── style.css
-                └── templates/
-                        └── index.html
+│   └── weights.npz                # the trained seq2seq weights (from Phase 2)
+├── data/
+│   ├── dictionary.txt             # the word list / correction gate
+│   └── tokenizer_config.json
+├── src/
+│   ├── autocorrect/
+│   │   └── predictor.py           # NumPy inference: beam search + dictionary gate
+│   └── webapp/
+│       ├── __init__.py            # create_app()
+│       ├── routes.py              # GET / and POST /predict
+│       ├── templates/index.html
+│       └── static/{script.js,style.css}
+├── tests/                         # predictor + Flask route tests
+└── .github/workflows/ci.yml
 ```
 
-## Setup and execution
+## Tests
 
-1. Clone the repository
-```
-git clone https://github.com/JAMPANIKOMAL/Type-Correcter-Ai
-cd Type-Correcter-Ai
-```
-
-2. Add model and data files
-- Place `autocorrect_model.h5` in `model/`
-- Place `tokenizer_config.json` in `data/`
-- Optionally add `raw_corpus.txt`, `train_clean.txt`, `train_noisy.txt` to `data/`
-
-3. Create the environment (choose one)
-
-Option A — CPU (recommended)
-```
-conda env create -f environment.yml
-conda activate type-correcter-ai-cpu
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
-Option B — GPU
-```
-conda env create -f environment-gpu.yml
-conda activate type-correcter-ai-gpu
-# Post-install (required)
-conda install -c conda-forge cudatoolkit=11.2 cudnn=8.1.0 -y
-```
+CI runs ruff and the tests on Python 3.10–3.12. Everything is NumPy + Flask, so
+it is fast.
 
-Option C — Python venv + pip
-```
-python -m venv venv
-# Activate:
-# On Windows:
-.\venv\Scripts\activate
-# On macOS/Linux:
-source venv/bin/activate
-pip install -r requirements.txt
-```
-Note: GPU support requires manual NVIDIA driver/CUDA setup.
+## What changed from the archived version
 
-4. Run the web app
-```
-python app.py
-```
-Open the URL shown in the console (default: http://127.0.0.1:5000).
+The earlier version did not work as a typo corrector:
 
-## Optional: Re-train the model
+- **It used a word-level model.** The committed model (a bidirectional GRU over a
+  whole-corpus word vocabulary — a 98 MB model and a **179 MB** tokenizer)
+  treated each word as one token, so a misspelled word was simply an unknown
+  token it could not fix, and it only "corrected" typos it had memorized. Typo
+  correction is a **character**-level problem, which is exactly what the Phase-2
+  model does — so this app now serves that model instead, as the project was
+  always meant to ("integrates the trained AI from Prototype 2").
+- **It needed TensorFlow to run.** The web app now serves the model with NumPy
+  only, so the server is ~3 MB of weights instead of ~280 MB and needs no ML
+  runtime.
+- The hundreds of megabytes of training corpus were removed from the working
+  tree (kept out of HEAD; the model is trained in Phase 2).
 
-If you add new raw data to `data/raw_corpus.txt`, run:
-```
-python src/training_scripts/01_data_preprocessing.py
-python src/training_scripts/02_model_training.py
-```
+See [CHANGELOG.md](CHANGELOG.md).
 
-`02_model_training.py` has a `TEST_MODE` flag at the top: `True` trains on
-just 20,000 samples for 3 epochs (fast, for verifying the pipeline works);
-`False` trains on the full corpus for 50 epochs (slow, the real model).
-**The committed `model/autocorrect_model.h5` was trained with
-`TEST_MODE = True`** — see Known Limitations below.
+## Limitations
 
-## Known limitations
-
-- **The shipped model is the quick test-mode run, not a fully-trained
-  one.** Verified by loading `autocorrect_model.h5` directly and running
-  real predictions: it currently outputs `<oov>` (out-of-vocabulary) for
-  most non-trivial input, since it only saw 20,000 of the full training
-  set's samples for 3 epochs. Re-run `02_model_training.py` with
-  `TEST_MODE = False` (expect a long CPU training time, or use a GPU
-  environment) to get a model that actually corrects text well.
-- Fixed while verifying this: `predictor.py`'s output decoding checked
-  for the literal strings `'<sos>'`/`'<eos>'`, but Keras's `Tokenizer`
-  strips `<`/`>` by default, so the real vocabulary entries are `'sos'`/
-  `'eos'` — the check never matched, so both control tokens leaked into
-  every prediction and generation never stopped early. Fixed to match the
-  actual vocabulary.
-
-## Acknowledgements
-
-- Dataset basis: [Leipzig Corpora Collection](https://wortschatz.uni-leipzig.de/en/download/English)
+- **One word at a time, dictionary-bounded** — it has no sentence context and
+  cannot split or join words (`alot` → `a lot` is out of reach).
+- **Small-model ceiling** — it fixes common single-typo words well, but misses
+  two-error words (`definately` → `definitely`) and real-word errors.
+- **Not deployed** — a local Flask development server; no auth, not hardened for
+  the public internet.
 
 ## License
 
-MIT License — see [LICENSE](./LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
