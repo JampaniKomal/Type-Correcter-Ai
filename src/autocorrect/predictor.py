@@ -1,136 +1,146 @@
-"""
-Handles loading the trained AI model and tokenizer
-to perform predictions (corrections).
-"""
+"""Load the trained corrector and fix the typos in a piece of text.
 
-import os
+The model is the character-level sequence-to-sequence corrector from
+Prototype 2 (Ghost-Type-Corrector). It runs here with **NumPy only** - the web
+app does not need TensorFlow at all - using beam search plus a dictionary gate:
+
+* a word already in the dictionary is never changed, and
+* a proposed correction is only used if it is itself a real word.
+
+This endpoint corrects a whole passage by correcting each word in turn and
+putting the spacing and capitalization back.
+"""
+from __future__ import annotations
+
 import json
+import os
+import re
+
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.text import tokenizer_from_json
-from keras_preprocessing.sequence import pad_sequences
-import warnings
 
-# --- Path Definitions ---
-# Define paths relative to the *project root*, not this file.
-# This file is at: Type-Correcter-Ai/src/autocorrect/predictor.py
-# The project root is 3 levels up.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MODEL_PATH = os.path.join(BASE_DIR, 'model', 'autocorrect_model.h5')
-TOKENIZER_PATH = os.path.join(BASE_DIR, 'data', 'tokenizer_config.json')
+WEIGHTS_PATH = os.path.join(BASE_DIR, "model", "weights.npz")
+TOKENIZER_PATH = os.path.join(BASE_DIR, "data", "tokenizer_config.json")
+DICTIONARY_PATH = os.path.join(BASE_DIR, "data", "dictionary.txt")
 
-# Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
+_WORD = re.compile(r"[A-Za-z]+")
+
 
 class Corrector:
-    """
-    A class to encapsulate the trained model and tokenizer
-    for making typo corrections.
-    """
-    
-    def __init__(self, model_path, tokenizer_path):
-        """
-        Initializes the Corrector by loading the model and tokenizer.
-        
-        Args:
-            model_path (str): Path to the saved .h5 model file.
-            tokenizer_path (str): Path to the saved tokenizer_config.json file.
-        """
-        print("INFO: Loading model and tokenizer...")
+    def __init__(self, weights_path=WEIGHTS_PATH, tokenizer_path=TOKENIZER_PATH,
+                 dictionary_path=DICTIONARY_PATH):
+        print("INFO: Loading corrector (NumPy, no TensorFlow)...")
         try:
-            # Load the pre-trained model
-            self.model = load_model(model_path, compile=False)
-            
-            # Load the tokenizer
-            with open(tokenizer_path, 'r', encoding='utf-8') as f:
-                # The tokenizer is saved as a JSON string
-                tokenizer_data = json.load(f) 
-                self.tokenizer = tokenizer_from_json(tokenizer_data)
-            
-            # Get model's expected input length
-            self.max_len = self.model.input_shape[1]
-            if not self.max_len:
-                # Fallback for models with dynamic input.
-                # We will assume 20, which is used in 02_model_training.py
-                print("WARN: Could not infer max_len from model. Assuming 20.")
-                self.max_len = 20
-                
-            # Create reverse mapping (index -> word)
-            self.reverse_word_index = {v: k for k, v in self.tokenizer.word_index.items()}
-            
-            print(f"INFO: Model loaded successfully. Max sequence length: {self.max_len}")
+            w = np.load(weights_path)
+            self.enc_emb, self.enc_k, self.enc_rk, self.enc_b = (
+                w["enc_emb"], w["enc_k"], w["enc_rk"], w["enc_b"])
+            self.dec_emb, self.dec_k, self.dec_rk, self.dec_b = (
+                w["dec_emb"], w["dec_k"], w["dec_rk"], w["dec_b"])
+            self.den_k, self.den_b = w["den_k"], w["den_b"]
+            self.U = self.enc_rk.shape[0]
 
-        except Exception as e:
-            print(f"CRITICAL ERROR: Failed to load model or tokenizer.")
-            print(f"Error: {e}")
-            print(f"Please ensure '{model_path}' and '{tokenizer_path}' exist.")
-            self.model = None
-            self.tokenizer = None
-            self.max_len = 0
+            cfg = json.loads(open(tokenizer_path, encoding="utf-8").read())
+            self.c2i = cfg["char_to_index"]
+            self.i2c = {int(k): v for k, v in cfg["index_to_char"].items()}
+            self.maxlen = cfg["max_seq_length"]
+            self.start, self.end, self.pad = (
+                cfg["start_token_index"], cfg["end_token_index"], cfg["pad_token_index"])
+            self.dictionary = {
+                line.strip() for line in open(dictionary_path, encoding="utf-8") if line.strip()}
+            self.loaded = True
+            print(f"INFO: corrector ready ({len(self.dictionary):,}-word dictionary)")
+        except Exception as exc:  # noqa: BLE001 - surface any load failure to the UI
+            print(f"CRITICAL ERROR: failed to load the corrector: {exc}")
+            self.loaded = False
+
+    # -- neural core (mirrors Ghost-Type-Corrector's inference) ----------------
+
+    @staticmethod
+    def _sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-x))
+
+    @staticmethod
+    def _log_softmax(v):
+        v = v - v.max()
+        e = np.exp(v)
+        return np.log(e / e.sum())
+
+    def _step(self, x, h, c, k, rk, b):
+        u = self.U
+        z = x @ k + h @ rk + b
+        i = self._sigmoid(z[:u])
+        f = self._sigmoid(z[u:2 * u])
+        g = np.tanh(z[2 * u:3 * u])
+        o = self._sigmoid(z[3 * u:])
+        c2 = f * c + i * g
+        return o * np.tanh(c2), c2
+
+    def _encode(self, word):
+        h = np.zeros(self.U, dtype=np.float32)
+        c = np.zeros(self.U, dtype=np.float32)
+        for t in [self.start] + [self.c2i.get(ch, self.pad) for ch in word] + [self.end]:
+            h, c = self._step(self.enc_emb[t], h, c, self.enc_k, self.enc_rk, self.enc_b)
+        return h, c
+
+    def _candidates(self, word, beam_width=5, max_candidates=8):
+        h0, c0 = self._encode(word)
+        beams = [(0.0, [self.start], h0, c0)]
+        finished = []
+        for _ in range(self.maxlen):
+            nxt = []
+            for score, seq, h, c in beams:
+                nh, nc = self._step(self.dec_emb[seq[-1]], h, c, self.dec_k, self.dec_rk, self.dec_b)
+                logp = self._log_softmax(nh @ self.den_k + self.den_b)
+                for t in np.argsort(logp)[-beam_width:]:
+                    t = int(t)
+                    if t in (self.end, self.pad):
+                        finished.append((score + logp[t], seq))
+                    else:
+                        nxt.append((score + logp[t], seq + [t], nh, nc))
+            if not nxt:
+                break
+            nxt.sort(key=lambda b: -b[0] / max(len(b[1]), 1))
+            beams = nxt[:beam_width]
+        pool = finished + [(s, sq) for s, sq, _, _ in beams]
+        pool.sort(key=lambda b: -b[0] / max(len(b[1]), 1))
+        words, seen = [], set()
+        for _, seq in pool:
+            txt = "".join(self.i2c.get(t, "") for t in seq if t not in (self.start, self.end, self.pad))
+            txt = txt.replace("\t", "").replace("\n", "")
+            if txt and txt not in seen:
+                seen.add(txt)
+                words.append(txt)
+            if len(words) >= max_candidates:
+                break
+        return words
+
+    def correct_word(self, word):
+        lower = word.lower()
+        # Leave very short words alone: "a" and "i" are real words the
+        # dictionary omits (it only keeps words of length >= 2), and correcting
+        # one- or two-letter tokens is all risk and no reward.
+        if len(lower) < 3 or not lower.isalpha() or lower in self.dictionary:
+            return word
+        for cand in self._candidates(lower):
+            if cand != lower and cand in self.dictionary:
+                return _match_case(word, cand)
+        return word
+
+    # -- text-level API used by the web route ----------------------------------
 
     def predict(self, text):
-        """
-        Predicts the correction for a given input text.
-        
-        Args:
-            text (str): The noisy input text.
-            
-        Returns:
-            str: The corrected output text.
-        """
-        if not self.model or not self.tokenizer:
-            return "Error: Model is not loaded."
-            
-        # 1. Preprocess the input text
-        try:
-            # Add <sos> and <eos> tokens, as used in training
-            clean_text = f"<sos> {text.lower()} <eos>"
-            
-            # Convert text to sequence
-            sequence = self.tokenizer.texts_to_sequences([clean_text])
-            
-            # Pad the sequence
-            padded_sequence = pad_sequences(sequence, maxlen=self.max_len, padding='post')
-            
-            # 2. Make prediction
-            prediction = self.model.predict(padded_sequence, verbose=0)
-            
-            # 3. Decode the prediction
-            # Output shape is (batch, max_len, vocab_size)
-            # Get the index of the highest probability word at each step
-            output_indices = np.argmax(prediction, axis=-1)[0]
-            
-            return self._indices_to_text(output_indices)
+        if not getattr(self, "loaded", False):
+            return "Error: the corrector is not loaded."
+        return _WORD.sub(lambda m: self.correct_word(m.group(0)), text)
 
-        except Exception as e:
-            print(f"Error during prediction: {e}")
-            return "Error: Prediction failed."
 
-    def _indices_to_text(self, indices):
-        """Helper function to convert a list of indices back to a string."""
-        words = []
-        for idx in indices:
-            if idx == 0:  # Skip padding token
-                continue
-            word = self.reverse_word_index.get(idx)
-            if word:
-                # The tokenizer's default filters strip '<' and '>' from
-                # the literal "<sos>"/"<eos>" text seen during training, so
-                # the vocabulary actually stores these as bare "sos"/"eos" -
-                # matching the bracketed form here never fires, letting both
-                # tokens leak into every prediction and preventing early
-                # stopping at the real end of the sequence.
-                if word == 'eos': # Stop at end-of-sequence
-                    break
-                if word == 'sos': # Skip start-of-sequence
-                    continue
-                words.append(word)
-        return ' '.join(words)
+def _match_case(original, corrected):
+    if original.isupper():
+        return corrected.upper()
+    if original[:1].isupper():
+        return corrected[:1].upper() + corrected[1:]
+    return corrected
 
-# --- Singleton Instance ---
-# Create a single instance of the Corrector when the app loads.
-# This is crucial for performance, as it avoids re-loading the
-# model (which is slow) on every single web request.
+
 print("INFO: Initializing global Corrector instance...")
-corrector_instance = Corrector(model_path=MODEL_PATH, tokenizer_path=TOKENIZER_PATH)
+corrector_instance = Corrector()
