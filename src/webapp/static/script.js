@@ -68,6 +68,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Attach the event listener to the button
     correctButton.addEventListener('click', getCorrection);
+
+    // Shareable demo link: /?demo fills in a sample and corrects it on load.
+    if (new URLSearchParams(window.location.search).has('demo')) {
+        inputText.value = 'teh recieve is beleive and i havw a problme wriITng somethign';
+        getCorrection();
+    }
     
     // Bonus: Add a Ctrl+Enter shortcut for convenience
     inputText.addEventListener('keydown', (e) => {

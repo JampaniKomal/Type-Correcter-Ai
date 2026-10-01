@@ -5,8 +5,10 @@ This file contains the 'create_app' factory function which
 initializes and configures the Flask application.
 """
 
-from flask import Flask
 import os
+
+from flask import Flask
+
 
 def create_app():
     """
@@ -14,7 +16,7 @@ def create_app():
     """
     # __name__ is the name of the current Python module
     app = Flask(__name__, instance_relative_config=True)
-    
+
     # Set a default secret key (good for sessions)
     app.config.from_mapping(
         SECRET_KEY='dev',
